@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>OITem Cross-Section Profiler</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header>
+    <h1>OITem Cross-Section Profiler</h1>
+    <p>Cross-sectional morphology analysis of engineered skeletal muscle.</p>
+  </header>
+
+  <main>
+    <section class="panel controls">
+      <label>画像ファイル
+        <input id="fileInput" type="file" accept="image/*" />
+      </label>
+
+      <div class="row pointInputs">
+        <span class="groupTitle">支点座標(px)</span>
+        <label>点1 X
+          <input id="p1x" type="number" step="0.01" placeholder="未指定" />
+        </label>
+        <label>点1 Y
+          <input id="p1y" type="number" step="0.01" placeholder="未指定" />
+        </label>
+        <label>点2 X
+          <input id="p2x" type="number" step="0.01" placeholder="未指定" />
+        </label>
+        <label>点2 Y
+          <input id="p2y" type="number" step="0.01" placeholder="未指定" />
+        </label>
+        <button id="applyPointInputs" type="button">座標を反映</button>
+      </div>
+
+      <div class="row">
+        <label>分割数
+          <input id="numSamples" type="number" min="2" max="500" value="50" />
+        </label>
+        <label>スキャン半幅(px)
+          <input id="scanHalf" type="number" min="10" max="2000" value="250" />
+        </label>
+        <label>実寸スケール
+          <input id="umPerPx" type="number" min="0" step="0.0001" value="1" />
+          <span class="unit">µm / px</span>
+        </label>
+      </div>
+
+      <div class="row">
+        <label>しきい値方式
+          <select id="thresholdMode">
+            <option value="dark">暗い部分を筋肉として検出</option>
+            <option value="redness">赤〜茶色の部分を筋肉として検出</option>
+          </select>
+        </label>
+        <div class="thresholdControl" aria-label="しきい値調整">
+          <span class="controlLabel">しきい値</span>
+          <button id="thresholdMinus5" type="button" class="smallBtn">−5</button>
+          <button id="thresholdMinus1" type="button" class="smallBtn">−1</button>
+          <input id="threshold" type="range" min="0" max="255" value="120" />
+          <input id="thresholdNumber" type="number" min="0" max="255" step="1" value="120" />
+          <button id="thresholdPlus1" type="button" class="smallBtn">+1</button>
+          <button id="thresholdPlus5" type="button" class="smallBtn">+5</button>
+        </div>
+        <label>連続判定ゆるさ(px)
+          <input id="gapTol" type="number" min="0" max="30" value="6" />
+        </label>
+      </div>
+
+      <div class="buttons">
+        <button id="resetPoints">点をリセット</button>
+        <button id="measureBtn">測定する</button>
+        <button id="downloadCsv" disabled>CSVダウンロード</button>
+        <button id="downloadOverlay" disabled>オーバーレイ画像ダウンロード</button>
+      </div>
+
+      <ol class="howto">
+        <li>画像を読み込む</li>
+        <li>左の支持柱中心をクリック、または座標を数値入力</li>
+        <li>右の支持柱中心をクリック、または座標を数値入力</li>
+        <li>必要に応じて、○をドラッグして位置調整</li>
+        <li>しきい値はスライダー、±ボタン、数値入力で調整可能</li>
+        <li>「測定する」→ CSV出力・オーバーレイ画像出力</li>
+      </ol>
+    </section>
+
+    <section class="canvasWrap">
+      <canvas id="canvas"></canvas>
+    </section>
+
+    <section class="panel">
+      <h2>Cross-Section Profile Results</h2>
+      <div id="summary">未測定</div>
+      <table id="resultTable">
+        <thead>
+          <tr>
+            <th>index</th><th>t</th><th>x(px)</th><th>y(px)</th><th>cross-section width(px)</th><th>cross-section width(µm)</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </section>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>

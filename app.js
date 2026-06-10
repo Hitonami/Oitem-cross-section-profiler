@@ -26,30 +26,198 @@ const summary = document.getElementById('summary');
 
 let img = new Image();
 let imageData = null;
+let loadedFileName = '';
+let loadedImageKind = '';
 let points = [];
 let draggingIndex = -1;
 let results = [];
 
-fileInput.addEventListener('change', e => {
+fileInput.addEventListener('change', async e => {
   const file = e.target.files[0];
   if (!file) return;
-  const url = URL.createObjectURL(file);
-  img.onload = () => {
-    canvas.width = img.naturalWidth;
-    canvas.height = img.naturalHeight;
+  loadedFileName = file.name;
+  const isTiff = /\.(tif|tiff)$/i.test(file.name) || /image\/tiff/i.test(file.type || '');
+  try {
+    if (isTiff) {
+      const buffer = await file.arrayBuffer();
+      const decoded = decodeTiffToImageData(buffer);
+      loadedImageKind = `TIFF (${decoded.width} x ${decoded.height})`;
+      await loadImageDataAsSource(decoded.imageData, decoded.width, decoded.height);
+    } else {
+      loadedImageKind = file.type || 'standard image';
+      await loadStandardImageFile(file);
+    }
     points = [];
     results = [];
     draw();
     imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
     tbody.innerHTML = '';
-    summary.textContent = '左右の支持柱中心を2点クリックしてください。';
+    summary.textContent = `${loadedFileName} を読み込みました。左右の支持柱中心を2点クリックしてください。`;
     downloadCsv.disabled = true;
     downloadOverlay.disabled = true;
     updatePointInputs();
-    URL.revokeObjectURL(url);
-  };
-  img.src = url;
+  } catch (err) {
+    console.error(err);
+    alert(`画像の読み込みに失敗しました。\n${err.message || err}`);
+  }
 });
+
+function loadStandardImageFile(file) {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file);
+    img = new Image();
+    img.onload = () => {
+      canvas.width = img.naturalWidth;
+      canvas.height = img.naturalHeight;
+      URL.revokeObjectURL(url);
+      resolve();
+    };
+    img.onerror = () => {
+      URL.revokeObjectURL(url);
+      reject(new Error('この画像形式はブラウザで読み込めません。TIFFの場合は拡張子が .tif または .tiff であることを確認してください。'));
+    };
+    img.src = url;
+  });
+}
+
+function loadImageDataAsSource(decodedImageData, width, height) {
+  canvas.width = width;
+  canvas.height = height;
+  ctx.putImageData(decodedImageData, 0, 0);
+  const dataUrl = canvas.toDataURL('image/png');
+  return new Promise((resolve, reject) => {
+    img = new Image();
+    img.onload = resolve;
+    img.onerror = () => reject(new Error('TIFFをCanvas画像へ変換できませんでした。'));
+    img.src = dataUrl;
+  });
+}
+
+
+function decodeTiffToImageData(buffer) {
+  const view = new DataView(buffer);
+  const byteOrder = String.fromCharCode(view.getUint8(0), view.getUint8(1));
+  const little = byteOrder === 'II';
+  if (!little && byteOrder !== 'MM') throw new Error('TIFFのバイトオーダーを判定できません。');
+  const u16 = off => view.getUint16(off, little);
+  const u32 = off => view.getUint32(off, little);
+  if (u16(2) !== 42) throw new Error('有効なTIFFファイルではありません。');
+
+  const ifdOffset = u32(4);
+  const tags = readIfd(view, ifdOffset, little);
+  const width = Number(firstValue(tags[256]));
+  const height = Number(firstValue(tags[257]));
+  if (!width || !height) throw new Error('TIFFから画像サイズを取得できません。');
+
+  const compression = Number(firstValue(tags[259], 1));
+  if (compression !== 1) {
+    throw new Error(`このTIFFの圧縮形式（Compression=${compression}）には未対応です。ImageJ/Fiji等で非圧縮TIFFとして保存してください。`);
+  }
+
+  const photometric = Number(firstValue(tags[262], 1));
+  const samplesPerPixel = Number(firstValue(tags[277], 1));
+  const planarConfig = Number(firstValue(tags[284], 1));
+  if (planarConfig !== 1) throw new Error('Planar TIFFには未対応です。Interleaved形式で保存してください。');
+
+  const bits = valuesOf(tags[258], [8]);
+  const bitsPerSample = bits.map(Number);
+  const bits0 = bitsPerSample[0] || 8;
+  if (!bitsPerSample.every(b => b === bits0)) throw new Error('サンプルごとにbit深度が異なるTIFFには未対応です。');
+  if (![8, 16].includes(bits0)) throw new Error(`このbit深度（${bits0} bit）には未対応です。8-bitまたは16-bit TIFFを使用してください。`);
+  if (![1, 3, 4].includes(samplesPerPixel)) throw new Error(`SamplesPerPixel=${samplesPerPixel} のTIFFには未対応です。グレースケールまたはRGB/RGBA TIFFを使用してください。`);
+
+  const stripOffsets = valuesOf(tags[273]);
+  const stripByteCounts = valuesOf(tags[279]);
+  if (!stripOffsets.length || !stripByteCounts.length) throw new Error('TIFFのStripOffsets/StripByteCountsを取得できません。');
+
+  const bytesPerSample = bits0 / 8;
+  const bytesPerPixel = samplesPerPixel * bytesPerSample;
+  const raw = new Uint8Array(width * height * bytesPerPixel);
+  let dst = 0;
+  for (let i = 0; i < stripOffsets.length; i++) {
+    const off = Number(stripOffsets[i]);
+    const count = Number(stripByteCounts[i] ?? stripByteCounts[0]);
+    raw.set(new Uint8Array(buffer, off, count), dst);
+    dst += count;
+  }
+
+  const out = new ImageData(width, height);
+  const signed = Number(firstValue(tags[339], 1)) === 2;
+  const maxUnsigned = bits0 === 16 ? 65535 : 255;
+  for (let pix = 0; pix < width * height; pix++) {
+    const base = pix * bytesPerPixel;
+    let r, g, b, a = 255;
+    if (samplesPerPixel === 1) {
+      const v = readSample(raw, base, bits0, little, signed);
+      const gray = photometric === 0 ? 255 - scaleSample(v, bits0, signed, maxUnsigned) : scaleSample(v, bits0, signed, maxUnsigned);
+      r = g = b = gray;
+    } else {
+      r = scaleSample(readSample(raw, base, bits0, little, signed), bits0, signed, maxUnsigned);
+      g = scaleSample(readSample(raw, base + bytesPerSample, bits0, little, signed), bits0, signed, maxUnsigned);
+      b = scaleSample(readSample(raw, base + bytesPerSample * 2, bits0, little, signed), bits0, signed, maxUnsigned);
+      if (samplesPerPixel >= 4) a = scaleSample(readSample(raw, base + bytesPerSample * 3, bits0, little, signed), bits0, signed, maxUnsigned);
+    }
+    const o = pix * 4;
+    out.data[o] = r;
+    out.data[o + 1] = g;
+    out.data[o + 2] = b;
+    out.data[o + 3] = a;
+  }
+  return { width, height, imageData: out };
+}
+
+function readIfd(view, offset, little) {
+  const u16 = off => view.getUint16(off, little);
+  const u32 = off => view.getUint32(off, little);
+  const n = u16(offset);
+  const tags = {};
+  for (let i = 0; i < n; i++) {
+    const e = offset + 2 + i * 12;
+    const tag = u16(e);
+    const type = u16(e + 2);
+    const count = u32(e + 4);
+    const valueOffset = e + 8;
+    const typeSize = { 1: 1, 2: 1, 3: 2, 4: 4, 5: 8, 6: 1, 7: 1, 8: 2, 9: 4, 10: 8, 11: 4, 12: 8 }[type];
+    if (!typeSize) continue;
+    const total = typeSize * count;
+    const dataOffset = total <= 4 ? valueOffset : u32(valueOffset);
+    const values = [];
+    for (let j = 0; j < count; j++) {
+      const p = dataOffset + j * typeSize;
+      if (type === 1 || type === 7) values.push(view.getUint8(p));
+      else if (type === 3) values.push(view.getUint16(p, little));
+      else if (type === 4) values.push(view.getUint32(p, little));
+      else if (type === 6) values.push(view.getInt8(p));
+      else if (type === 8) values.push(view.getInt16(p, little));
+      else if (type === 9) values.push(view.getInt32(p, little));
+      else if (type === 11) values.push(view.getFloat32(p, little));
+      else if (type === 12) values.push(view.getFloat64(p, little));
+      else if (type === 2) values.push(String.fromCharCode(view.getUint8(p)));
+      else if (type === 5) values.push(view.getUint32(p, little) / view.getUint32(p + 4, little));
+      else if (type === 10) values.push(view.getInt32(p, little) / view.getInt32(p + 4, little));
+    }
+    tags[tag] = { type, count, values };
+  }
+  return tags;
+}
+
+function valuesOf(tag, fallback = []) { return tag ? tag.values : fallback; }
+function firstValue(tag, fallback = undefined) { return tag && tag.values.length ? tag.values[0] : fallback; }
+
+function readSample(raw, offset, bits, little, signed) {
+  if (bits === 8) return signed ? (raw[offset] << 24) >> 24 : raw[offset];
+  const v = little ? raw[offset] | (raw[offset + 1] << 8) : (raw[offset] << 8) | raw[offset + 1];
+  return signed ? (v << 16) >> 16 : v;
+}
+
+function scaleSample(v, bits, signed, maxUnsigned) {
+  if (signed) {
+    const min = bits === 16 ? -32768 : -128;
+    const max = bits === 16 ? 32767 : 127;
+    return clamp(Math.round((v - min) * 255 / (max - min)), 0, 255);
+  }
+  return bits === 16 ? clamp(Math.round(v * 255 / maxUnsigned), 0, 255) : clamp(v, 0, 255);
+}
 
 function setThreshold(value, shouldMeasure = false) {
   const v = clamp(Math.round(Number(value)), 0, 255);
@@ -312,26 +480,39 @@ function renderTable() {
 }
 function fmt(v) { return Number.isFinite(v) ? v.toFixed(3) : ''; }
 
+
 function exportCsv() {
-  const header = [
-    'ThresholdMode','ThresholdValue',
-    'LeftSupportX_px','LeftSupportY_px','RightSupportX_px','RightSupportY_px',
-    'ProfilePointID','NormalizedDistanceFromLeftSupport','CenterX_px','CenterY_px','CrossSectionWidth_px','CrossSectionWidth_um',
-    'Edge1X_px','Edge1Y_px','Edge2X_px','Edge2Y_px'
-  ];
-  const lines = [header.join(',')];
   const p0 = points[0] || { x: NaN, y: NaN };
   const p1 = points[1] || { x: NaN, y: NaN };
-  const thresholdValue = Number(threshold.value);
-  const thresholdModeValue = thresholdMode.value;
+  const fileName = loadedFileName || (fileInput.files && fileInput.files[0] ? fileInput.files[0].name : '');
+  const now = new Date().toISOString();
+
+  const lines = [];
+  lines.push('# Analysis Parameters');
+  lines.push(`SourceImage,${fileName}`);
+  lines.push(`SourceImageType,${loadedImageKind}`);
+  lines.push(`AnalysisDateTime,${now}`);
+  lines.push(`ThresholdMode,${thresholdModeEl.value}`);
+  lines.push(`ThresholdValue,${Number(thresholdEl.value)}`);
+  lines.push(`ContinuityTolerance,${Number(gapTolEl.value)}`);
+  lines.push(`NumberOfSections,${Number(numSamplesEl.value)}`);
+  lines.push(`ScanHalfLength,${Number(scanHalfEl.value)}`);
+  lines.push(`PixelToMicron,${Number(umPerPxEl.value)}`);
+  lines.push(`LeftSupportX_px,${p0.x}`);
+  lines.push(`LeftSupportY_px,${p0.y}`);
+  lines.push(`RightSupportX_px,${p1.x}`);
+  lines.push(`RightSupportY_px,${p1.y}`);
+  lines.push('');
+  lines.push('# Measurement Results');
+  lines.push('ProfilePointID,NormalizedDistanceFromLeftSupport,CenterX_px,CenterY_px,CrossSectionWidth_px,CrossSectionWidth_um,Edge1X_px,Edge1Y_px,Edge2X_px,Edge2Y_px');
+
   for (const r of results) {
     lines.push([
-      thresholdModeValue, thresholdValue,
-      p0.x, p0.y, p1.x, p1.y,
       r.index, r.t, r.x, r.y, r.widthPx, r.widthUm,
       r.edge1.x, r.edge1.y, r.edge2.x, r.edge2.y
-    ].map(v => typeof v === 'number' ? (Number.isFinite(v) ? Number(v).toFixed(6) : '') : `"${String(v).replaceAll('\"', '\"\"')}"`).join(','));
+    ].map(v => Number.isFinite(v) ? Number(v).toFixed(6) : '').join(','));
   }
+
   const blob = new Blob([lines.join('\n')], { type: 'text/csv;charset=utf-8' });
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
